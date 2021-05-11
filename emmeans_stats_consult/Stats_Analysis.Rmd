@@ -1,0 +1,464 @@
+---
+title: "Laura Alt - Analysis"
+author: "Miranda Tilton"
+date: "September 30, 2020"
+output: pdf_document
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", cache = TRUE)
+library(lemon) # prints out tables nicely in the PDF
+```
+
+# The data
+
+```{r render = lemon_print, kable.opts = list(caption = "A selection of the data", digits = 3)}
+data <- readxl::read_xlsx("Alt_sampledata.xlsx", sheet = "72_Day")
+data$Site <- as.factor(data$Site)
+data$Soil <- as.factor(data$Soil)
+head(data, 8)
+```
+
+The data are balanced, with three replicates for each $Site \times Soil$ treatment.
+
+```{r echo = TRUE}
+table(data[,c("Soil","Day","Site")])
+```
+
+\newpage
+
+# Plot all data
+
+```{r fig.height = 2.9, fig.width = 6}
+data_long <- tidyr::pivot_longer(data, cols = c("tetM_rel", "tet44_rel", "ermF_rel", "ermB_rel", "sul1_rel", "sul2_rel"))
+
+library(ggplot2) # package for flexible data visualizations
+ggplot(data_long, aes(x = Day, y = value)) + # y on original scale
+  geom_point() + 
+  facet_wrap(~name, scales = "free_y", ncol = 3, dir = "v") + 
+  theme_bw()
+
+ggplot(data_long, aes(x = Day, y = log(value))) + #y on log scale
+  geom_point() + 
+  facet_wrap(~name, scales = "free_y", ncol = 3, dir = "v") + 
+  theme_bw()
+```
+
+\newpage
+
+# Analysis notes
+
+Data are 1) non-linear on the log-scale and 2) some genes are censored heavily, especially at large time values.
+
+Potential analysis methods:
+
+- Fit linear model to $\log(y)$ given Day, Soil, Site, and relevant interactions. Compare k-values (i.e., slopes) for significance.
+    - Residuals are patterned. Model choice is not appropriate and conducting inference is risky.
+- Fit quadratic model to all 72 days of data (i.e., $\log(y)$ given Day, $\text{Day}^2$, Soil, and Site).
+    - Fits significantly better than linear model.
+    - Considers censored data as true data, so quadratic fit is heavily influenced by their value.
+    - To test differences between sites and/or soil types, use nested model comparison methods (e.g., a nested F-test via `anova(mod1, mod2)`)
+- Fit censored regression to censored genes using all 72 days of data.
+    - For some gene/site/soil combinations (e.g., tetM/2015 - Worle / Crop), most of the data are censored. Models fit to these data might still be questionable.
+    - The R package `censReg` requires scalar bounds of censoring, but these data have each value normalized by a different denominator. Thus, appropriate software to model these data as censored is not readily available. For this reason, **censored modeling is not attempted in this document.**
+- Use only days 0-21 and fit linear models, as in the first bullet point.
+    - There seems to be two different kinematics, or data structures/patterns, going on: 0-21 days, and 21-72 days. The 0-21 day mechanism seems approximately linear in the log(y) scale.
+    - Added bonus of removing a large portion of the censored data (which are at later time periods), precluding formal censored-data modeling.
+    - May still need quadratic terms (like first two bullets above) to deal with slight pattern in residuals
+    
+Additionally, one gene (sul1) shows a counter-intuitive increase in concentration over time, and thus should likely be excluded from all analyses.
+
+\newpage
+
+# Modeling tetM
+
+Visualize the data on the $\log(y)$ scale, without and with linear fit. Nonlinearity is visually apparent.
+
+```{r fig.height = 3.1, fig.width = 6}
+library(magrittr) # lets us use %>% to "pipe" previous results into next function
+theme_set(theme_bw())
+p <- data_long %>%
+  dplyr::filter(., name == "tetM_rel") %>% # the object gets piped to "."
+  ggplot(., aes(x = Day, y = log(value), color = Soil)) +
+  geom_point() + 
+  facet_wrap(~ Soil + Site, ncol = 3) + 
+  xlab("Sample Day") +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(family = "Times New Roman"),
+        axis.text.x = element_text(family = "Times New Roman"),
+        axis.text.y = element_text(family = "Times New Roman"),
+        axis.title.x = element_text(family = "Times New Roman"),
+        axis.title.y = element_text(family = "Times New Roman"),
+        strip.text.x = element_text(family = "Times New Roman"))
+p
+p + geom_smooth(method = "lm", formula = y~x)
+```
+
+\newpage
+
+#### Linear (in $\log(y)$) model for one site and soil type
+
+We can fit a linear model for a single site and soil type. (This model is identical to the results from the Excel document provided.)
+
+For a given site and soil type, the model equation is as follows: 
+
+$$\hat{\log(y)} = \hat{\beta_0} + \hat{\beta_1}(Day)$$
+
+```{r fig.height = 1.8, fig.width = 9}
+mod_tetM_Crop_2015 <- lm(formula = log(tetM_rel) ~ Day,
+                         data = dplyr::filter(data, Soil == "Crop" & Site == "WOR"))
+
+summary(mod_tetM_Crop_2015)
+par(mfrow = c(1,4), mar = c(4.1, 4.1, 1.5, 2.1)); plot(mod_tetM_Crop_2015)
+```
+
+\newpage
+
+#### Linear (in $\log(y)$) model for all sites and soil types
+
+Alternatively, for each gene, we can simultaneously fit a model to all of the sites and soil types. We can then conduct inference manually (harder) or with `emmeans` package (documentation [here](https://cran.r-project.org/web/packages/emmeans/index.html)).
+
+We fit the simulteneous model on the next page, but explain the model interpretation here for clarity. The full model equation is as follows:
+
+\def\arraystretch{1.5}
+
+\begin{center}
+\begin{tabular}{r l}
+$\hat{\log(y)}$ &= $\hat{\beta_0} + \hat{\beta_1}*Day + \hat{\beta_2}*I(Soil = Strip) + \hat{\beta_3}*I(Site = 2013) + \hat{\beta_4}*I(Site = 2015)$ \\
+&$\; \; \; + \hat{\beta_5}*\left[Day \times I(Soil = Strip)\right] + \hat{\beta_6}*\left[Day \times I(Site = 2013)\right] + \hat{\beta_7}*\left[Day \times I(Site = 2015)\right]$ \\
+&$\; \; \; + \hat{\beta_8}*\left[I(Soil = Strip) \times I(Site = 2013)\right] + \hat{\beta_9} \times \left[I(Soil = Strip)*I(Site = 2015)\right]$ \\
+&$ \; \; \; + \hat{\beta_{10}}*\left[Day \times I(Soil = Strip) \times I(Site = 2013)\right]+ \hat{\beta_{11}}*\left[Day \times I(Soil = Strip) \times I(Site = 2015)\right]$\\ 
+\end{tabular}
+\end{center}
+
+To obtain predictions for a particular site and soil type (e.g., $Soil = Crop$, $Site = 2013$), simplify the appropriate indicator functions and combine like terms. In general, if a term does not contain $Day$, it becomes part of the intercept; if a term contains $Day$, it becomes part of the slope.
+
+#### Examples
+
+First, notice that these models are formulated such that the "baseline" levels are $Soil = Crop$ and $Site = 2003$, since the indicator functions $I(Soil = Crop)$ and $I(Site = 2003)$ are not contained in any terms. (R has chosen these "baseline" levels automatically.) Thus, the prediction equation for **crop soil in 2003** is simply $$\log(y) = \hat{\beta_0} + \hat{\beta_1}*Day$$
+
+If, say, you want the equation for **strip soil in 2003**, then $I(Soil = Strip) = 1$, but $I(Site = 2013) = 0$ and $I(Site = 2015) = 0$. Then all $\hat{\beta_i}$ terms with $I(Site = 2013)$ or $I(Site = 2015)$ become 0 and cancel out, so the equation is now
+
+\begin{center}
+\begin{tabular}{r l}
+$\log(y)$ &= $\hat{\beta_0} + \hat{\beta_1}*Day + \hat{\beta_2}*I(Soil = Strip) + \hat{\beta_5}*\left[Day \times I(Soil = Strip)\right]$ \\
+&= $\left[\hat{\beta_0} + \hat{\beta_2}\right] + \left[\hat{\beta_1} + \hat{\beta_5}\right]*Day$\\ 
+\end{tabular}
+\end{center}
+
+Note: predictions made with this simultaneous model will equal predictions made from the separate models, since we've formulated it to allow a separate intercept and slope for each $Site \times Soil$ combination. Standard errors for terms will differ between the two models because the simultaneous model pools error information from all six $Site \times Soil$ combinations.
+
+Predictions can also be obtained with the following code (not run here).
+
+```{r eval = FALSE}
+# predict by creating a dataframe of values and using predict(model, data)
+predict_data <- expand.grid(Site = unique(data$Site),
+                            Soil = unique(data$Soil),
+                            Day = unique(data$Day))
+
+preds_df <- cbind(predict_data, exp(predict(model, predict_data))) # exp() to undo log()
+preds_df
+
+# or using the emmeans package to get means and CIs
+emmeans::emmeans(mod_tetM, specs = ~ Site + Soil + Day, cov.reduce = FALSE, type = "response")
+```
+
+\newpage
+
+#### Fit the linear model simultaneously to all sites and soil types
+
+```{r fig.height = 1.8, fig.width = 9}
+mod_tetM <- lm(log(tetM_rel) ~ Day + Soil + Site + Day:Soil + Day:Site + Site:Soil + Day:Site:Soil, 
+               data = data)
+summary(mod_tetM) # coefficient significance here is misleading. Use emmeans package
+anova(mod_tetM) # test for main effects of site and soil
+par(mfrow = c(1,4), mar = c(4.1, 4.1, 1.5, 2.1)); plot(mod_tetM) # examine residuals
+```
+
+```{r warning = FALSE, fig.height = 1.8, fig.width = 7.2, out.width = "85%"}
+library(emmeans)
+em <- emtrends(mod_tetM, pairwise ~ Soil + Site, var = "Day")
+em$emtrends # estimates and CIs for the six slopes / k values
+plot(em) # visualize estimates and CIs for the six slopes / k values
+```
+
+```{r fig.height = 2, fig.width = 6, out.width = "80%"}
+emmip(mod_tetM, Soil ~ Day | Site, cov.reduce = FALSE, type = "response") # predicted curves
+```
+
+\newpage
+
+## Quadratic trend for tetM?
+
+First, we can plot and visually inspect a quadratic fit for each site and soil type. It does appear to fit the data better.
+
+```{r}
+p + geom_smooth(method = "lm", formula = y~x+I(x^2))
+```
+
+\newpage
+
+#### Quadratic (in $\log(y)$) model for all sites and soil types
+
+Here, we take the simultaneous linear model (from earlier) and add a quadratic effect of Day. See Page 6 of this document for details on how to retrieve predictions and/or prediction equations for individual sites and soil types.
+
+```{r}
+data2 <- data
+levels(data2$Site) <- c("2003", "2013", "2015") # rename so output fits on  1 line
+
+# to include a squared term, it must be within the identity function I()
+mod_tetM2 <- lm(log(tetM_rel) ~ Day + Soil + Site + Day:Soil + Day:Site + Site:Soil + Day:Site:Soil + 
+                  I(Day^2) + I(Day^2):Soil + I(Day^2):Site + I(Day^2):Soil:Site, 
+                data = data2) # use the newly created data2 with shorter site names
+summary(mod_tetM2)
+```
+
+\newpage
+
+```{r fig.height = 1.8, fig.width = 9}
+anova(mod_tetM2) # again, use emmeans for easier inference
+par(mfrow = c(1,4), mar = c(4.1, 4.1, 2, 2.1)); plot(mod_tetM2) # examine residuals
+```
+
+```{r}
+# compare two nested models - do added terms improve predictions?
+anova(mod_tetM, mod_tetM2) # small p-val -> quadratic model is significantly better
+```
+
+\newpage
+
+#### Conducting inference on quadratic model
+
+In the quadratic model, the effect of $Day$ is now spread across both linear and quadratic terms. To interpret these models, we can conduct a nested F-test to determine whether a term, or set of terms, significantly improves the model fit. 
+
+A nested F-test can be run with `anova(mod1, mod2)`, where mod1 and mod2 are nested (i.e., one model's terms are a subset of the other's). If the p-value is small, we have statistically significant evidence that the more complex model is a significant improvement over the simpler model. If, on the other hand, the p-value is large, then the larger model is not a significant improvement over the simplified model.
+
+#### Testing for soil type effects
+
+In this case, we will test for soil type effects by removing terms associated with soil type (which creates a model where intercepts and slopes no longer differ between the soil types) and comparing this to the full quadratic model where each $Site \times Soil$ gets its own slope and intercept.
+
+```{r}
+# remove ALL terms that include Soil
+mod_tetM_noSoil <- lm(log(tetM_rel) ~ Day + Site + Day:Site + I(Day^2) + I(Day^2):Site, data = data2)
+
+anova(mod_tetM2, mod_tetM_noSoil)
+```
+
+Comparing the full quadratic model to the model completely removing soil type  effects (`mod_tetM_noSoil`) yields a p-value < .01, which indicates that accounting for soil type significantly improves predictions. 
+
+However, if we conduct another nested F-test by *removing soil type from only slope terms*, but allowing different intercepts for different soil types, we obtain a p-value that is quite large. This suggests that a model allowing different intercepts for each $Site \times Soil$, but only one slope per $Site$, performs similarly to the model that allows models for different soil types to differ in both intercepts and slopes. 
+
+In other words, we do not have statistically significant evidence that soil type impacts the rate of gene dissipation for tetM. 
+
+```{r}
+# remove any term containing Soil:Day or Soil:I(Day^2), but keep Soil and Soil:Site
+mod_tetM_noSoil2 <- lm(log(tetM_rel) ~ Day + Site + Soil + Site:Soil + Day:Site +
+                         I(Day^2) + I(Day^2):Site, data = data2)
+anova(mod_tetM_noSoil2, mod_tetM2)
+```
+
+The following plots contain the predicted curves from the full quadratic model and the quadratic model without soil type effects in the slope (see previous page for more details). Statistically speaking, the more complex model (top) is not supported as "better" than the simpler model (bottom) that allows intercepts to differ but imposes the same slope within a Site (regardless of soil type).
+
+```{r warning = FALSE, fig.height = 3, fig.width = 6}
+# full quadratic model
+emmip(mod_tetM2, Soil ~ Day + I(Day^2) | Site, cov.reduce = FALSE, type = "response")
+```
+
+```{r warning = FALSE, fig.height = 3, fig.width = 6}
+# model where soil types within a site must have same slopes
+emmip(mod_tetM_noSoil2, Soil ~ Day + I(Day^2) | Site, cov.reduce = FALSE, type = "response")
+```
+
+\newpage
+
+#### Testing for site age effects
+
+To conduct inference about site age, we can again set up a series of hierarchically nested models and use the `anova()` function to determine whether the additional terms significantly improve the fits of the models.
+
+In this case, `mod1` removes site information entirely. `mod2` allows *intercepts* to differ by site (within a soil type), but constrains the effect of site to behave linearly by site age. Similarly, `mod3` constrains the effect of site to behave linearly by site age, but allows *both slopes and intercepts* to differ across the three sites. Finally, `mod4` *removes the linear constraints on site age* and allows full flexibility of slopes and intercepts across all six $Site \times Soil$ combinations.
+
+Based on the F-tests below, there is statistically significant evidence that site age affects predictions, but this is again primarily due to varying intercepts rather than slopes (mod 2 vs 3, p = .066); additionally, allowing the three sites to differ freely is a significant improvement over considering site age as a linear effect.
+
+```{r}
+data2$SiteAge <- 2020 - as.numeric(as.character(data2$Site))
+
+# no effect of Site or SiteAge
+mod1 <- lm(log(tetM_rel) ~ Day + Soil +  Day:Soil  + I(Day^2) + I(Day^2):Soil, data = data2)
+
+# SiteAge as numeric, intercept only
+mod2 <- lm(log(tetM_rel) ~ Day + Soil + SiteAge + Day:Soil + SiteAge:Soil + I(Day^2) + I(Day^2):Soil, 
+           data = data2)
+
+# SiteAge as numeric, intercept and slope
+mod3 <- lm(log(tetM_rel) ~ Day + Soil + SiteAge + Day:Soil + Day:SiteAge + SiteAge:Soil + Day:SiteAge:Soil + I(Day^2) + I(Day^2):Soil + I(Day^2):SiteAge + I(Day^2):Soil:SiteAge, 
+           data = data2)
+
+# SiteAge as categorical (i.e., means model, full flexibility), intercept and slope
+# Note: formulating SiteAge as quadratic is mathematically equivalent to treating it as categorical
+# E.g., a line can be fit between any two points, and a quadratic between any three, etc
+mod4 <- lm(log(tetM_rel) ~ Day + Soil + SiteAge + I(SiteAge^2) + Day:Soil + Day:SiteAge + Day:I(SiteAge^2) + SiteAge:Soil + I(SiteAge^2):Soil + Day:SiteAge:Soil + Day:I(SiteAge^2):Soil + I(Day^2) + I(Day^2):Soil + I(Day^2):SiteAge +  I(Day^2):I(SiteAge^2) + I(Day^2):Soil:SiteAge + I(Day^2):Soil:I(SiteAge^2), 
+           data = data2)
+
+anova(mod1, mod2, mod3, mod4)
+```
+
+```{r warning = FALSE, fig.height = 1.7, fig.width = 6}
+emmip(mod1, Soil ~ Day + I(Day^2), cov.reduce = FALSE, type = "response")
+
+emmip(mod2, Soil ~ Day + I(Day^2) |SiteAge, cov.reduce = FALSE, type = "response")
+
+emmip(mod3, Soil ~ Day + I(Day^2) |SiteAge, cov.reduce = FALSE, type = "response")
+
+emmip(mod4, Soil ~ Day + I(Day^2) | SiteAge, cov.reduce = FALSE, type = "response")
+```
+
+
+
+\newpage
+
+# Use only 21 days of data
+
+We will conduct a similar analysis to above, but only using the first 21 days of data.
+
+```{r fig.height = 2.9, fig.width = 6}
+data21 <- dplyr::filter(data, Day <= 21)
+data21_long <- tidyr::pivot_longer(
+  data21, cols = c("tetM_rel", "tet44_rel", "ermF_rel", "ermB_rel", "sul1_rel", "tetM_rel"))
+
+ggplot(data21_long, aes(x = Day, y = value)) +
+  geom_point() + 
+  facet_wrap(~name, scales = "free_y", ncol = 3, dir = "v") + 
+  theme_bw()
+
+ggplot(data21_long, aes(x = Day, y = log(value))) + #log scale
+  geom_point() + 
+  facet_wrap(~name, scales = "free_y", ncol = 3, dir = "v") + 
+  theme_bw()
+```
+
+\newpage
+
+```{r fig.height = 3.2, fig.width = 6}
+p <- data21_long %>%
+  dplyr::filter(name == "tetM_rel") %>%
+  ggplot(., aes(x = Day, y = log(value), color = Soil)) +
+  geom_point() + 
+  facet_wrap(~ Soil + Site, ncol = 3) + 
+  theme_bw()
+p
+p + geom_smooth(method = "lm", formula = y~x)
+```
+
+\newpage
+
+```{r fig.height = 1.8, fig.width = 9}
+mod_tetM_21 <- lm(log(tetM_rel) ~ Day + Soil + Site + Day:Soil + Day:Site + Site:Soil + Day:Site:Soil, 
+                  data = data21)
+summary(mod_tetM_21) # coefficient significance here is misleading. Use emmeans package
+anova(mod_tetM_21) # test for main effects of site and soil
+par(mfrow = c(1,4), mar = c(4.1, 4.1, 1.5, 2.1)); plot(mod_tetM_21) # examine residuals
+```
+
+```{r warning = FALSE, fig.height = 1.8, fig.width = 7.2, out.width = "85%"}
+library(emmeans)
+em <- emtrends(mod_tetM_21, pairwise ~ Soil + Site, var = "Day")
+em$emtrends # estimates and CIs for the six slopes / k values
+plot(em) # visualize estimates and CIs for the six slopes / k values
+```
+
+```{r fig.height = 2, fig.width = 6}
+emmip(mod_tetM_21, Soil ~ Day | Site, cov.reduce = FALSE, type = "response")
+```
+
+\newpage
+
+## Quadratic trend for tetM?
+
+```{r}
+p + geom_smooth(method = "lm", formula = y~x+I(x^2))
+```
+
+\newpage
+
+```{r}
+data2_21 <- data21
+levels(data2_21$Site) <- c("2003", "2013", "2015") # rename so output fits on  1 line
+
+# to include a squared term, it must be within the identity function I()
+mod_tetM2_21 <- lm(log(tetM_rel) ~ Day + Soil + Site + Day:Soil + Day:Site + Site:Soil + Day:Site:Soil + 
+                     I(Day^2) + I(Day^2):Soil + I(Day^2):Site + I(Day^2):Soil:Site, 
+                   data = data2_21) # use the newly created data2 with shorter site names
+summary(mod_tetM2_21)
+```
+
+\newpage
+
+```{r fig.height = 1.8, fig.width = 9}
+anova(mod_tetM2_21)
+par(mfrow = c(1,4), mar = c(4.1, 4.1, 2, 2.1)); plot(mod_tetM2_21)
+```
+
+```{r}
+anova(mod_tetM_21, mod_tetM2_21)
+```
+
+\newpage
+
+#### inference for soil type
+
+```{r}
+# remove ALL terms that include Soil
+mod_tetM_noSoil_21 <- lm(log(tetM_rel) ~ Day + Site + Day:Site + I(Day^2) + I(Day^2):Site, 
+                         data = data21)
+
+anova(mod_tetM2_21, mod_tetM_noSoil_21)
+```
+
+```{r}
+# remove any term containing Soil:Day or Soil:I(Day^2), but keep Soil and Soil:Site
+mod_tetM_noSoil2_21 <- lm(log(tetM_rel) ~ Day + Site + Soil + Site:Soil + Day:Site +
+                            I(Day^2) + I(Day^2):Site, 
+                          data = data2_21)
+
+anova(mod_tetM_noSoil2_21, mod_tetM2_21)
+```
+
+\newpage
+
+```{r warning = FALSE, fig.height = 3, fig.width = 6}
+# full quadratic model
+emmip(mod_tetM2_21, Soil ~ Day + I(Day^2) | Site, cov.reduce = FALSE, type = "response")
+```
+
+```{r warning = FALSE, fig.height = 3, fig.width = 6}
+# model where soil types within a site must have same slopes
+emmip(mod_tetM_noSoil2_21, Soil ~ Day + I(Day^2) | Site, cov.reduce = FALSE, type = "response")
+```
+
+\newpage
+
+#### inference for site age
+
+```{r}
+data2_21$SiteAge <- 2020 - as.numeric(as.character(data2_21$Site))
+
+# no effect of Site or SiteAge
+mod1_21 <- lm(log(tetM_rel) ~ Day + Soil +  Day:Soil  + I(Day^2) + I(Day^2):Soil, data = data2_21)
+
+# SiteAge as numeric, intercept only
+mod2_21 <- lm(log(tetM_rel) ~ Day + Soil + SiteAge + Day:Soil + SiteAge:Soil + I(Day^2) + I(Day^2):Soil, 
+           data = data2_21)
+
+# SiteAge as numeric, intercept and slope
+mod3_21 <- lm(log(tetM_rel) ~ Day + Soil + SiteAge + Day:Soil + Day:SiteAge + SiteAge:Soil + Day:SiteAge:Soil + I(Day^2) + I(Day^2):Soil + I(Day^2):SiteAge + I(Day^2):Soil:SiteAge, 
+           data = data2_21)
+
+# SiteAge as categorical (i.e., means model, full flexibility), intercept and slope
+# Note: formulating SiteAge as quadratic is mathematically equivalent to treating it as categorical
+# E.g., a line can be perfectly fit between any two points, and a quadratic between any three, etc
+mod4_21 <- lm(log(tetM_rel) ~ Day + Soil + SiteAge + I(SiteAge^2) + Day:Soil + Day:SiteAge + Day:I(SiteAge^2) + SiteAge:Soil + I(SiteAge^2):Soil + Day:SiteAge:Soil + Day:I(SiteAge^2):Soil + I(Day^2) + I(Day^2):Soil + I(Day^2):SiteAge +  I(Day^2):I(SiteAge^2) + I(Day^2):Soil:SiteAge + I(Day^2):Soil:I(SiteAge^2), 
+           data = data2_21)
+
+anova(mod1_21, mod2_21, mod3_21, mod4_21)
+```
